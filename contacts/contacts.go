@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -177,8 +178,8 @@ func NewClient(authManager AuthManager) *Client {
 	}
 }
 
-func (c *Client) FetchFeed() (*Feed, error) {
-	data, err := c.FetchFeedRaw()
+func (c *Client) FetchFeed(start, max int64) (*Feed, error) {
+	data, err := c.FetchFeedRaw(start, max)
 	if err != nil {
 		return nil, err
 	}
@@ -186,20 +187,20 @@ func (c *Client) FetchFeed() (*Feed, error) {
 	return unmarshalResponse(data)
 }
 
-func (c *Client) FetchFeedRaw() ([]byte, error) {
+func (c *Client) FetchFeedRaw(start, max int64) ([]byte, error) {
 	accessToken, err := c.AuthManager.AccessToken()
 
 	if err != nil {
 		return nil, err
 	}
 
-	data, err := c.retrieveFeed(accessToken)
+	data, err := c.retrieveFeed(start, max, accessToken)
 	if err != nil {
 		accessToken, err = c.AuthManager.Renew()
 		if err != nil {
 			return nil, err
 		}
-		data, err = c.retrieveFeed(accessToken)
+		data, err = c.retrieveFeed(start, max, accessToken)
 		if err != nil {
 			return nil, err
 		}
@@ -315,7 +316,7 @@ func (c *Client) saveContact(accessToken string, entry *Entry) (*Entry, error) {
 	return unmarshalEntry(buf.Bytes())
 }
 
-func (c *Client) retrieveFeed(accessToken string) ([]byte, error) {
+func (c *Client) retrieveFeed(start, max int64, accessToken string) ([]byte, error) {
 	protocol := "https"
 	if c.DisableHTTPS {
 		protocol = "http"
@@ -324,7 +325,8 @@ func (c *Client) retrieveFeed(accessToken string) ([]byte, error) {
 
 	values := url.Values{}
 	// TODO: support pagination
-	values.Set("max-results", "10000")
+	values.Set("max-results", fmt.Sprintf("%d", max))
+	values.Set("start-index", fmt.Sprintf("%d", start))
 	values.Set("access_token", accessToken)
 	return c.get(fullURL + "?" + values.Encode())
 }

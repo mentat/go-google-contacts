@@ -6,7 +6,7 @@ import (
 
 	"github.com/alexflint/go-arg"
 
-	"github.com/petrkotek/go-google-contacts/contacts"
+	"github.com/mentat/go-google-contacts/contacts"
 )
 
 func main() {
@@ -32,14 +32,14 @@ func main() {
 	switch args.Command {
 	case "fetch_feed":
 		if args.Raw {
-			data, err := apiClient.FetchFeedRaw()
+			data, err := apiClient.FetchFeedRaw(1, 100)
 			if err != nil {
 				fmt.Println("error: ", err)
 				os.Exit(1)
 			}
 			fmt.Println(string(data))
 		} else {
-			feed, err := apiClient.FetchFeed()
+			feed, err := apiClient.FetchFeed(1, 100)
 			if err != nil {
 				fmt.Println("error: ", err)
 				os.Exit(1)
