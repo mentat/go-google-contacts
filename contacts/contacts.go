@@ -27,6 +27,11 @@ type Feed struct {
 	Entries      []Entry `xml:"entry"`
 }
 
+type EntryType interface {
+	GetURI() string
+	GetEtag() string
+}
+
 type Entry struct {
 	XMLName xml.Name  `xml:"entry"`
 	ETag    string    `xml:"etag,attr"`
@@ -54,6 +59,14 @@ type Entry struct {
 	UserDefinedFields   []UserDefinedField    `xml:"userDefinedField"`
 	Websites            []Website             `xml:"website"`
 	GroupMembershipInfo []GroupMembershipInfo `xml:"groupMembershipInfo"`
+}
+
+func (e *Entry) GetURI() string {
+	return e.Id
+}
+
+func (e *Entry) GetEtag() string {
+	return e.ETag
 }
 
 func (e *Entry) GetId() string {
@@ -246,7 +259,7 @@ func (c *Client) fetchContact(accessToken, contactID string) ([]byte, error) {
 	return c.get(contactID + "?" + values.Encode())
 }
 
-func (c *Client) Save(entry *Entry) (*Entry, error) {
+func (c *Client) Save(entry EntryType) (*Entry, error) {
 	accessToken, err := c.AuthManager.AccessToken()
 
 	if err != nil {
@@ -268,7 +281,29 @@ func (c *Client) Save(entry *Entry) (*Entry, error) {
 	return data, nil
 }
 
-func (c *Client) saveContact(accessToken string, entry *Entry) (*Entry, error) {
+func (c *Client) SaveRaw(entry EntryType) (*bytes.Buffer, error) {
+	accessToken, err := c.AuthManager.AccessToken()
+
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := c.saveContactRaw(accessToken, entry)
+	if err != nil {
+		accessToken, err = c.AuthManager.Renew()
+		if err != nil {
+			return nil, err
+		}
+		data, err = c.saveContactRaw(accessToken, entry)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return data, nil
+}
+
+func (c *Client) saveContactRaw(accessToken string, entry EntryType) (*bytes.Buffer, error) {
 
 	xmlBytes, err := xml.MarshalIndent(entry, "", "  ")
 	if err != nil {
@@ -281,12 +316,12 @@ func (c *Client) saveContact(accessToken string, entry *Entry) (*Entry, error) {
 	//       see e.g. https://github.com/golang/go/issues/12624
 	xmlString := fixXml(string(xmlBytes))
 	reader := strings.NewReader(xmlString)
-	url := entry.Id + "?" + values.Encode()
+	url := entry.GetURI() + "?" + values.Encode()
 
 	request, err := http.NewRequest("PUT", url, reader)
 	request.Header.Add("GData-Version", "3.0")
 	request.Header.Add("Content-Type", "application/atom+xml")
-	request.Header.Add("If-Match", entry.ETag)
+	request.Header.Add("If-Match", entry.GetEtag())
 
 	if err != nil {
 		return nil, err
@@ -311,6 +346,17 @@ func (c *Client) saveContact(accessToken string, entry *Entry) (*Entry, error) {
 		return nil, err
 	}
 
+	return buf, nil
+}
+
+func (c *Client) saveContact(accessToken string, entry EntryType) (*Entry, error) {
+
+	buf, err := c.saveContactRaw(accessToken, entry)
+
+	if err != nil {
+		return nil, err
+	}
+
 	return unmarshalEntry(buf.Bytes())
 }
 
@@ -326,6 +372,7 @@ func (c *Client) retrieveFeed(start, max int64, accessToken string) ([]byte, err
 	values.Set("max-results", fmt.Sprintf("%d", max))
 	values.Set("start-index", fmt.Sprintf("%d", start))
 	values.Set("access_token", accessToken)
+
 	return c.get(fullURL + "?" + values.Encode())
 }
 
