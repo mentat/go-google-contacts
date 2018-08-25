@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -67,6 +68,7 @@ type StandardAuthManager struct {
 type StandardAccessTokenRetriever struct {
 	ClientID     string
 	GoogleSecret string
+	Client       *http.Client
 }
 
 func (r *StandardAccessTokenRetriever) Retrieve(refreshToken string) (string, error) {
@@ -77,10 +79,20 @@ func (r *StandardAccessTokenRetriever) Retrieve(refreshToken string) (string, er
 		"client_secret": []string{r.GoogleSecret},
 	}
 
-	resp, err := http.PostForm("https://www.googleapis.com/oauth2/v4/token", requestParams)
-	if err != nil {
-		return "", err
+	var resp *http.Response
+	var err error
+	if r.Client != nil {
+		resp, err = r.Client.PostForm("https://www.googleapis.com/oauth2/v4/token", requestParams)
+		if err != nil {
+			return "", fmt.Errorf("%s: %+v", err, requestParams)
+		}
+	} else {
+		resp, err = http.PostForm("https://www.googleapis.com/oauth2/v4/token", requestParams)
+		if err != nil {
+			return "", fmt.Errorf("No Client: %s: %+v", err, requestParams)
+		}
 	}
+
 	defer resp.Body.Close()
 	buf := new(bytes.Buffer)
 	buf.ReadFrom(resp.Body)

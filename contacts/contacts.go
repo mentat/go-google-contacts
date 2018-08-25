@@ -240,14 +240,10 @@ func (c *Client) FetchContactRaw(contactID string) ([]byte, error) {
 }
 
 func (c *Client) fetchContact(accessToken, contactID string) ([]byte, error) {
-	protocol := "https"
-	if c.DisableHTTPS {
-		protocol = "http"
-	}
 	values := url.Values{}
 	values.Set("access_token", accessToken)
-	fullUrl := protocol + "://" + basePath + contactID + "?" + values.Encode()
-	return c.get(fullUrl)
+	//fullUrl := protocol + "://" + basePath + contactID + "?" + values.Encode()
+	return c.get(contactID + "?" + values.Encode())
 }
 
 func (c *Client) Save(entry *Entry) (*Entry, error) {
@@ -273,10 +269,7 @@ func (c *Client) Save(entry *Entry) (*Entry, error) {
 }
 
 func (c *Client) saveContact(accessToken string, entry *Entry) (*Entry, error) {
-	protocol := "https"
-	if c.DisableHTTPS {
-		protocol = "http"
-	}
+
 	xmlBytes, err := xml.MarshalIndent(entry, "", "  ")
 	if err != nil {
 		return nil, err
@@ -288,12 +281,13 @@ func (c *Client) saveContact(accessToken string, entry *Entry) (*Entry, error) {
 	//       see e.g. https://github.com/golang/go/issues/12624
 	xmlString := fixXml(string(xmlBytes))
 	reader := strings.NewReader(xmlString)
-	url := protocol + "://" + basePath + entry.GetId() + "?" + values.Encode()
+	url := entry.Id + "?" + values.Encode()
 
 	request, err := http.NewRequest("PUT", url, reader)
 	request.Header.Add("GData-Version", "3.0")
 	request.Header.Add("Content-Type", "application/atom+xml")
 	request.Header.Add("If-Match", entry.ETag)
+
 	if err != nil {
 		return nil, err
 	}
@@ -302,12 +296,16 @@ func (c *Client) saveContact(accessToken string, entry *Entry) (*Entry, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	defer resp.Body.Close()
+
 	if resp.StatusCode >= 300 {
 		data, _ := ioutil.ReadAll(resp.Body)
 		return nil, errors.New("couldn't save entry; got " + resp.Status + "\nResponse:\n" + string(data))
 	}
+
 	buf := new(bytes.Buffer)
+
 	_, err = buf.ReadFrom(resp.Body)
 	if err != nil {
 		return nil, err
@@ -343,7 +341,8 @@ func (c *Client) get(url string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return nil, errors.New("couldn't fetch given URL; got " + resp.Status)
+		bodyText, _ := ioutil.ReadAll(resp.Body)
+		return nil, fmt.Errorf("couldn't fetch given URL; got %s: %s", resp.Status, bodyText)
 	}
 	buf := new(bytes.Buffer)
 	_, err = buf.ReadFrom(resp.Body)
