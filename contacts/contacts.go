@@ -2,6 +2,7 @@ package contacts
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -12,12 +13,14 @@ import (
 	"time"
 )
 
+const groupPath = "www.google.com/m8/feeds/groups/default/full/"
 const basePath = "www.google.com/m8/feeds/contacts/default/full/"
 
 type Client struct {
 	AuthManager  AuthManager
 	HTTPClient   *http.Client
 	DisableHTTPS bool
+	Cancel       context.CancelFunc
 }
 
 type Feed struct {
@@ -146,7 +149,7 @@ type PostalAddress struct {
 
 type StructuredPostalAddress struct {
 	Rel              string `xml:"rel,attr,omitempty"`
-	Primary          string `xml:"primary,attr,omitempty"`
+	Primary          bool   `xml:"primary,attr,omitempty"`
 	Label            string `xml:"label,attr,omitempty"`
 	City             string `xml:"city,omitempty"`
 	Street           string `xml:"street,omitempty"`
@@ -168,7 +171,7 @@ type ExtendedProperty struct {
 }
 
 type GroupMembershipInfo struct {
-	Deleted string `xml:"deleted,attr"`
+	Deleted bool   `xml:"deleted,attr"`
 	Href    string `xml:"href,attr"`
 }
 
@@ -184,6 +187,21 @@ type Organization struct {
 	OrgTitle string `xml:"orgTitle,omitempty"`
 }
 
+type ContactQuery struct {
+	Query      string
+	MaxResults int64
+	StartIndex int64
+	Group      string
+}
+
+// NewQuery - return a new ContactQuery struct initialized
+func NewQuery() *ContactQuery {
+	return &ContactQuery{
+		MaxResults: 100,
+		StartIndex: 1,
+	}
+}
+
 func NewClient(authManager AuthManager) *Client {
 	return &Client{
 		AuthManager: authManager,
@@ -191,8 +209,21 @@ func NewClient(authManager AuthManager) *Client {
 	}
 }
 
-func (c *Client) FetchFeed(start, max int64) (*Feed, error) {
-	data, err := c.FetchFeedRaw(start, max)
+// FetchContactImage - fetch a contact's image whos URL is 'href'
+// returns 3-tuple of picture (bytes, mimetype, error)
+func (c *Client) FetchContactImage(href string) ([]byte, string, error) {
+
+	accessToken, err := c.AuthManager.AccessToken()
+
+	if err != nil {
+		return nil, "", err
+	}
+
+	return c.get(href, accessToken)
+}
+
+func (c *Client) FetchGroups(start, max int64, query string) (*Feed, error) {
+	data, err := c.FetchGroupsRaw(start, max, query)
 	if err != nil {
 		return nil, err
 	}
@@ -200,20 +231,51 @@ func (c *Client) FetchFeed(start, max int64) (*Feed, error) {
 	return unmarshalResponse(data)
 }
 
-func (c *Client) FetchFeedRaw(start, max int64) ([]byte, error) {
+func (c *Client) FetchGroupsRaw(start, max int64, query string) ([]byte, error) {
 	accessToken, err := c.AuthManager.AccessToken()
 
 	if err != nil {
 		return nil, err
 	}
 
-	data, err := c.retrieveFeed(start, max, accessToken)
+	data, err := c.retrieveGroups(start, max, query, accessToken)
 	if err != nil {
 		accessToken, err = c.AuthManager.Renew()
 		if err != nil {
 			return nil, err
 		}
-		data, err = c.retrieveFeed(start, max, accessToken)
+		data, err = c.retrieveGroups(start, max, query, accessToken)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return data, nil
+}
+
+func (c *Client) FetchFeed(query *ContactQuery) (*Feed, error) {
+	data, err := c.FetchFeedRaw(query)
+	if err != nil {
+		return nil, err
+	}
+
+	return unmarshalResponse(data)
+}
+
+func (c *Client) FetchFeedRaw(query *ContactQuery) ([]byte, error) {
+	accessToken, err := c.AuthManager.AccessToken()
+
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := c.retrieveFeed(query, accessToken)
+	if err != nil {
+		accessToken, err = c.AuthManager.Renew()
+		if err != nil {
+			return nil, err
+		}
+		data, err = c.retrieveFeed(query, accessToken)
 		if err != nil {
 			return nil, err
 		}
@@ -254,9 +316,13 @@ func (c *Client) FetchContactRaw(contactID string) ([]byte, error) {
 
 func (c *Client) fetchContact(accessToken, contactID string) ([]byte, error) {
 	values := url.Values{}
-	values.Set("access_token", accessToken)
+	//values.Set("access_token", accessToken)
 	//fullUrl := protocol + "://" + basePath + contactID + "?" + values.Encode()
-	return c.get(contactID + "?" + values.Encode())
+
+	contactID = strings.Replace(contactID, "/base/", "/full/", -1)
+	bytes, _, err := c.get(contactID+"?"+values.Encode(), accessToken)
+
+	return bytes, err
 }
 
 func (c *Client) Save(entry EntryType) (*Entry, error) {
@@ -309,19 +375,21 @@ func (c *Client) saveContactRaw(accessToken string, entry EntryType) (*bytes.Buf
 	if err != nil {
 		return nil, err
 	}
-	values := url.Values{}
-	values.Set("access_token", accessToken)
 
 	// TODO: remove this ugly hack when xml namespaces in golang have better support
 	//       see e.g. https://github.com/golang/go/issues/12624
 	xmlString := fixXml(string(xmlBytes))
 	reader := strings.NewReader(xmlString)
-	url := entry.GetURI() + "?" + values.Encode()
+	url := entry.GetURI()
 
 	request, err := http.NewRequest("PUT", url, reader)
 	request.Header.Add("GData-Version", "3.0")
 	request.Header.Add("Content-Type", "application/atom+xml")
 	request.Header.Add("If-Match", entry.GetEtag())
+
+	if accessToken != "" {
+		request.Header.Add("Authorization", fmt.Sprintf("Bearer %s", accessToken))
+	}
 
 	if err != nil {
 		return nil, err
@@ -336,7 +404,7 @@ func (c *Client) saveContactRaw(accessToken string, entry EntryType) (*bytes.Buf
 
 	if resp.StatusCode >= 300 {
 		data, _ := ioutil.ReadAll(resp.Body)
-		return nil, errors.New("couldn't save entry; got " + resp.Status + "\nResponse:\n" + string(data))
+		return nil, errors.New("couldn't save entry: " + url + "; got " + resp.Status + "\nResponse:\n" + string(data))
 	}
 
 	buf := new(bytes.Buffer)
@@ -360,7 +428,29 @@ func (c *Client) saveContact(accessToken string, entry EntryType) (*Entry, error
 	return unmarshalEntry(buf.Bytes())
 }
 
-func (c *Client) retrieveFeed(start, max int64, accessToken string) ([]byte, error) {
+func (c *Client) retrieveGroups(start, max int64, query, accessToken string) ([]byte, error) {
+
+	protocol := "https"
+	if c.DisableHTTPS {
+		protocol = "http"
+	}
+	fullURL := protocol + "://" + groupPath
+
+	values := url.Values{}
+	values.Set("max-results", fmt.Sprintf("%d", max))
+	values.Set("start-index", fmt.Sprintf("%d", start))
+
+	if query != "" {
+		values.Set("q", query)
+	}
+
+	bytes, _, err := c.get(fullURL+"?"+values.Encode(), accessToken)
+
+	return bytes, err
+
+}
+
+func (c *Client) retrieveFeed(query *ContactQuery, accessToken string) ([]byte, error) {
 	protocol := "https"
 	if c.DisableHTTPS {
 		protocol = "http"
@@ -368,33 +458,53 @@ func (c *Client) retrieveFeed(start, max int64, accessToken string) ([]byte, err
 	fullURL := protocol + "://" + basePath
 
 	values := url.Values{}
-	// TODO: support pagination
-	values.Set("max-results", fmt.Sprintf("%d", max))
-	values.Set("start-index", fmt.Sprintf("%d", start))
-	values.Set("access_token", accessToken)
+	values.Set("max-results", fmt.Sprintf("%d", query.MaxResults))
+	values.Set("start-index", fmt.Sprintf("%d", query.StartIndex))
 
-	return c.get(fullURL + "?" + values.Encode())
+	if query.Query != "" {
+		values.Set("q", query.Query)
+	}
+
+	if query.Group != "" {
+		values.Set("group", query.Group)
+	}
+
+	bytes, _, err := c.get(fullURL+"?"+values.Encode(), accessToken)
+
+	return bytes, err
 }
 
-func (c *Client) get(url string) ([]byte, error) {
+func (c *Client) get(url, accessToken string) ([]byte, string, error) {
 	req, err := http.NewRequest("", url, nil)
+
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
+
 	req.Header.Add("GData-Version", "3.0")
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, err
+	if accessToken != "" {
+		req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", accessToken))
 	}
+
+	resp, err := c.HTTPClient.Do(req)
+
+	if err != nil {
+		return nil, "", err
+	}
+
 	defer resp.Body.Close()
+
 	if resp.StatusCode >= 300 {
 		bodyText, _ := ioutil.ReadAll(resp.Body)
-		return nil, fmt.Errorf("couldn't fetch given URL; got %s: %s", resp.Status, bodyText)
+		return nil, "", fmt.Errorf("couldn't fetch given URL; got %s: %s", resp.Status, bodyText)
 	}
+
+	mime := resp.Header.Get("Content-Type")
+
 	buf := new(bytes.Buffer)
 	_, err = buf.ReadFrom(resp.Body)
 
-	return buf.Bytes(), err
+	return buf.Bytes(), mime, err
 }
 
 func unmarshalResponse(data []byte) (*Feed, error) {
